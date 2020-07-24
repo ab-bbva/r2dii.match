@@ -10,11 +10,10 @@
 #' @template alias-assign
 #' @template ignores-but-preserves-existing-groups
 #'
-#' @param loanbook Data frame structured like [r2dii.data::loanbook_demo].
-#' @param ald Data frame structured like [r2dii.data::ald_demo] or
-#'   [r2dii.data::ald_scenario_demo].
-#' @param by_sector Should names only be compared if companies belong to the same
-#'   `sector`?
+#' @param loanbook,ald data frames structured like [r2dii.data::loanbook_demo]
+#'   and [r2dii.data::ald_demo].
+#' @param by_sector Should names only be compared if companies belong to the
+#'   same `sector`?
 #' @param min_score A number between 0-1, to set the minimum `score` threshold.
 #'   A `score` of 1 is a perfect match.
 #' @param method Method for distance calculation. One of `c("osa", "lv", "dl",
@@ -24,7 +23,8 @@
 #' @param overwrite A data frame used to overwrite the `sector` and/or `name`
 #'   columns of a particular direct loantaker or ultimate parent. To overwrite
 #'   only `sector`, the value in the `name` column should be `NA` and
-#'   vice-versa. This file can be used to manually match loanbook companies to ald.
+#'   vice-versa. This file can be used to manually match loanbook companies to
+#'   ald.
 #'
 #' @family user-oriented
 #'
@@ -54,15 +54,16 @@
 #' @export
 #'
 #' @examples
+#' library(dplyr, warn.conflicts = FALSE)
 #' library(r2dii.data)
-#' library(dplyr)
 #'
-#' mini_loanbook <- slice_sample(loanbook_demo, n = 10)
+#' mini_loanbook <- sample_n(loanbook_demo, 10)
+#' ald <- distinct(ald_demo, name_company, sector)
 #'
-#' match_name(mini_loanbook, ald_demo)
+#' match_name(mini_loanbook, ald)
 #'
 #' match_name(
-#'   mini_loanbook, ald_demo,
+#'   mini_loanbook, ald,
 #'   min_score = 0.9,
 #'   by_sector = TRUE
 #' )
@@ -77,108 +78,108 @@ match_name <- function(loanbook,
   loanbook <- ungroup(loanbook)
   loanbook_rowid <- tibble::rowid_to_column(loanbook)
 
-  prep_lbk <- suppressMessages(
-    restructure_loanbook_for_matching(loanbook_rowid, overwrite = overwrite)
-  )
-  prep_ald <- restructure_ald_for_matching(sanitize_ald(ald))
+  prep_lbk <- restructure_loanbook(loanbook_rowid, overwrite = overwrite)
+  prep_ald <- restructure_ald_for_matching(ald)
 
-  matched <- score_alias_similarity(
-    prep_lbk, prep_ald,
-    by_sector = by_sector,
-    method = method,
-    p = p
-  ) %>%
-    pick_min_score(min_score)
-
-  no_match <- identical(nrow(matched), 0L)
-  if (no_match) {
-    rlang::warn("Found no match.")
-    out <- named_tibble(names = minimum_names_of_match_name(loanbook)) %>%
-      unsuffix_and_regroup(old_groups) %>%
-      select(-.data$alias, -.data$alias_ald)
-    return(out)
+  if (by_sector) {
+    a <- expand_alias(prep_lbk, prep_ald)
+  } else {
+    a <- tidyr::crossing(alias_lbk = prep_lbk$alias, alias_ald = prep_ald$alias)
   }
 
-  preferred <- prefer_perfect_match_by(matched, .data$id_2dii)
+  setDT(a)
 
-  preferred %>%
-    restore_cols_sector_name_from_ald(prep_ald, by_sector = by_sector) %>%
-    # Restore columns from loanbook
-    left_join(loanbook_rowid, by = "rowid") %>%
-    mutate(rowid = NULL) %>%
-    reorder_names_as_in_loanbook(loanbook_rowid) %>%
+  if (identical(nrow(a), 0L)) {
+    rlang::warn("Found no match.")
+    return(empty_loanbook_tibble(loanbook, old_groups))
+  }
+
+  a <- unique(a)[
+    ,
+    score := stringdist::stringsim(
+      alias_lbk, alias_ald,
+      method = method, p = p
+    )
+  ]
+  setkey(a, score)
+  a <- a[score >= min_score, ]
+
+  if (identical(nrow(a), 0L)) {
+    rlang::warn("Found no match.")
+    return(empty_loanbook_tibble(loanbook, old_groups))
+  }
+
+  l <- rename(prep_lbk, alias_lbk = .data$alias)
+  setDT(l)
+  matched <- a[l, on = "alias_lbk", nomatch = 0]
+  matched <- matched[,
+    pick := none_is_one(score) | some_is_one(score),
+    by = id_2dii
+  ][pick == TRUE][, pick := NULL]
+
+  prep_ald <- rlang::set_names(prep_ald, paste0, "_ald")
+  setDT(prep_ald)
+  matched <- prep_ald[matched, on = "alias_ald", allow.cartesian = TRUE]
+
+  if (by_sector) {
+    matched <- matched[sector == sector_ald, ]
+  }
+
+  # Restore columns from loanbook
+  setDT(loanbook_rowid)
+  matched <- loanbook_rowid[matched, on = "rowid"]
+  matched <- matched[, rowid := NULL]
+  matched <- as_tibble(matched)
+
+  matched <- reorder_names_as_in_loanbook(matched, loanbook_rowid)
+  matched <- unsuffix_and_regroup(matched, old_groups)
+  matched <- select(matched, -.data$alias, -.data$alias_ald)
+  # Remove attribute added by data.table
+  attr(matched, ".internal.selfref") <- NULL
+
+  matched
+}
+
+empty_loanbook_tibble <- function(loanbook, old_groups) {
+  types <- loanbook %>%
+    purrr::map_chr(typeof)
+
+  out <- named_tibble(names = minimum_names_of_match_name(loanbook)) %>%
     unsuffix_and_regroup(old_groups) %>%
     select(-.data$alias, -.data$alias_ald)
+
+  tmp <- tempfile()
+  utils::write.csv(out, tmp, row.names = FALSE)
+  utils::read.csv(tmp, stringsAsFactors = FALSE, colClasses = types) %>%
+    as_tibble()
 }
 
-sanitize_ald <- function(ald) {
-  crucial <- c("name_company", "sector")
-  is_ald <- all(purrr::map_lgl(crucial, ~ rlang::has_name(ald, .x)))
+# readr -------------------------------------------------------------------
 
-  if (!is_ald) {
-    undo <- function(x) rlang::set_names(names(x), unname(x))
+expand_alias <- function(loanbook, ald) {
+  vars <- c("sector", "alias")
+  l <- dplyr::nest_by(select(loanbook, vars), .data$sector, .key = "alias_lbk")
+  a <- dplyr::nest_by(select(ald, vars), .data$sector, .key = "alias_ald")
+  la <- dplyr::inner_join(l, a, by = "sector")
 
-    crucial2 <- unname(undo(new_names_from_old_names())[crucial])
-    check_crucial_names(ald, crucial2)
-
-    ald <- dplyr::rename(ald, dplyr::all_of(undo(new_names_from_old_names())))
-  }
-
-  ald
-}
-
-# Used in r2dii.data 0.0.3.9001 to create ald_scenario_demo from ald_demo (old)
-new_names_from_old_names <- function() {
-  c(
-    "id" = "name_company",
-    "ald_sector" = "sector",
-    "technology" = "technology",
-    "ald_production_unit" = "production_unit",
-    "year" = "year",
-    "ald_production" = "production",
-    "ald_emission_factor" = "emission_factor",
-    "domicile_region" = "country_of_domicile",
-    "ald_location" = "plant_location",
-    "is_ultimate_owner" = "is_ultimate_owner"
+  purrr::map2_df(
+    la$alias_lbk, la$alias_ald,
+    ~ tidyr::expand_grid(alias_lbk = .x$alias, alias_ald = .y$alias)
   )
 }
 
 unsuffix_and_regroup <- function(data, old_groups) {
   data %>%
     rename(alias = .data$alias_lbk) %>%
-    dplyr::group_by(!!!old_groups)
-}
-
-pick_min_score <- function(data, min_score) {
-  data %>%
-    filter(.data$score >= min_score) %>%
-    unique()
+    group_by(!!!old_groups)
 }
 
 named_tibble <- function(names) {
-  dplyr::slice(tibble::as_tibble(set_names(as.list(names))), 0L)
+  slice(as_tibble(set_names(as.list(names))), 0L)
 }
 
 minimum_names_of_match_name <- function(loanbook) {
   unique(c(names(loanbook), names_added_by_match_name()))
-}
-
-restore_cols_sector_name_from_ald <- function(matched, prep_ald, by_sector) {
-  out <- matched %>%
-    left_join(rlang::set_names(prep_ald, paste0, "_ald"), by = "alias_ald")
-
-  if (!by_sector) {
-    return(out)
-  }
-
-  out %>% filter(.data$sector == .data$sector_ald)
-}
-
-prefer_perfect_match_by <- function(data, ...) {
-  data %>%
-    group_by(...) %>%
-    filter(none_is_one(.data$score) | some_is_one(.data$score)) %>%
-    ungroup()
 }
 
 none_is_one <- function(x) {

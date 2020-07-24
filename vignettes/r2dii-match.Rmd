@@ -16,18 +16,22 @@ The package r2dii.match helps you to match counterparties from a loanbook to com
 We use the package r2dii.match to access the most important functions you'll learn about. We also use example datasets from the package r2dii.data, and optional but convenient functions from the packages dplyr and readr.
 
 ```{r}
-library(dplyr)
-# r2dii.data is changing rapidly; ensure you have the latest version
-# remotes::update_packages("r2dii.data", upgrade = "ask")
+library(dplyr, warn.conflicts = FALSE)
 library(r2dii.data)
 library(r2dii.match)
 ```
 
-## Format input data [loanbook](https://2degreesinvesting.github.io/r2dii.data/reference/loanbook_description.html) and [asset-level data (ald)](https://2degreesinvesting.github.io/r2dii.data/reference/ald_description.html)
+## Format input data loanbook and asset-level data (ald)
 
 We need two datasets: a "loanbook" and an "asset-level dataset" (ald). These should be formatted like:  [`loanbook_demo`](https://2degreesinvesting.github.io/r2dii.data/reference/loanbook_demo.html) and [`ald_demo`](https://2degreesinvesting.github.io/r2dii.data/reference/ald_demo.html) (from the [r2dii.data package](https://2degreesinvesting.github.io/r2dii.data)).
 
-(A note on sector classification: Matches are preferred when the sector from the `loanbook` matches the sector from the `ald`. The `loanbook` sector is determined internally using the `sector_classification_system` and `sector_classification_direct_loantaker` columns. Currently, `sector_classification_system` must be either `ISIC` or `NACE`. If you would like to use a different classification system, please raise an issue in [r2dii.data](https://github.com/2DegreesInvesting/r2dii.data) and we can incorporate it.)
+A note on sector classification: Matches are preferred when the sector from the `loanbook` matches the sector from the `ald`. The `loanbook` sector is determined internally using the `sector_classification_system` and `sector_classification_direct_loantaker` columns. Currently, we only allow a couple specific values for `sector_classification_system`:
+```{r}
+sector_classifications$code_system %>%
+  unique()
+```
+
+If you would like to use a different classification system, please raise an issue in [r2dii.data](https://github.com/2DegreesInvesting/r2dii.data) and we can incorporate it.
 
 ```{r}
 loanbook_demo
@@ -42,10 +46,10 @@ If you want to use `loanbook_demo` and `ald_demo` as template to create your own
 ```r
 # Writting to current working directory 
 loanbook_demo %>% 
-  write_csv(path = "loanbook_demo.csv")
+  readr::write_csv(path = "loanbook_demo.csv")
 
 ald_demo %>% 
-  write_csv(path = "ald_demo.csv")
+  readr::write_csv(path = "ald_demo.csv")
 ```
 
 * For each dataset, replace our demo data with your data.
@@ -54,8 +58,8 @@ ald_demo %>%
 
 ```r
 # Reading from current working directory 
-your_loanbook <- read_csv("your_loanbook.csv")
-your_ald <- read_csv("your_ald.csv")
+your_loanbook <- readr::read_csv("your_loanbook.csv")
+your_ald <- readr::read_csv("your_ald.csv")
 ```
 
 Here we continue to use the `*_demo` datasets, pretending they contain the data of your own.
@@ -87,11 +91,11 @@ match_name(your_loanbook, your_ald)
 `match_name()` defaults to scoring matches between name strings that belong to the same sector. Using `by_sector = FALSE` removes this limitation -- increasing computation time, and the number of potentially incorrect matches to manually validate.
 
 ```{r}
-match_name(your_loanbook, your_ald, by_sector = FALSE) %>% 
+match_name(your_loanbook, your_ald, by_sector = FALSE) %>%
   nrow()
 
 # Compare
-match_name(your_loanbook, your_ald, by_sector = TRUE) %>% 
+match_name(your_loanbook, your_ald, by_sector = TRUE) %>%
   nrow()
 ```
 
@@ -114,7 +118,8 @@ If you are happy with the matching coverage achieved, proceed to the next step. 
 
 ```{r}
 matched <- match_name(
-  your_loanbook, your_ald, min_score = 0.9, overwrite = overwrite_demo
+  your_loanbook, your_ald,
+  min_score = 0.9, overwrite = overwrite_demo
 )
 ```
 
@@ -128,7 +133,7 @@ Notice the warning.
 
 ## Prioritize validated matches by level
 
-The validated dataset may have multiple matches per loan. Consider the case where a loan is given to "Acme Power USA", a subsidiary of "Acme Power Co.". There may be both "Acme Power USA" and "Acme Power Co." in the `ald`, and so there could be two valid matches for this loan. To get the best match only, use `prioritize()` -- it picks rows where `score` is 2 and `level` per loan is of highest `priority()`:
+The validated dataset may have multiple matches per loan. Consider the case where a loan is given to "Acme Power USA", a subsidiary of "Acme Power Co.". There may be both "Acme Power USA" and "Acme Power Co." in the `ald`, and so there could be two valid matches for this loan. To get the best match only, use `prioritize()` -- it picks rows where `score` is 1 and `level` per loan is of highest `priority()`:
 
 ```{r}
 # Pretend we validated the matched dataset
@@ -136,9 +141,9 @@ valid_matches <- matched
 
 some_interesting_columns <- vars(id_2dii, level, score)
 
-valid_matches %>% 
-  prioritize() %>% 
-  select(!!! some_interesting_columns)
+valid_matches %>%
+  prioritize() %>%
+  select(!!!some_interesting_columns)
 ```
 
 By default, highest priority refers to the most granular match (`direct_loantaker`). The default priority is set internally via `prioritize_levels()`.
@@ -150,11 +155,7 @@ prioritize_level(matched)
 You may use a different priority. One way to do that is to pass a function to `priority`. For example, use `rev` to reverse the default priority.
 
 ```{r}
-matched %>% 
-  prioritize(priority = rev) %>% 
-  select(!!! some_interesting_columns)
+matched %>%
+  prioritize(priority = rev) %>%
+  select(!!!some_interesting_columns)
 ```
-
-## Next: Analyze
-
-Once you achieve enough matching coverage, you can analyze the output of `prioritize()` with the package [r2dii.analysis](https://github.com/2DegreesInvesting/r2dii.analysis).
